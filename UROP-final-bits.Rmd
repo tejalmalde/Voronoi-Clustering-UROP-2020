@@ -1,0 +1,188 @@
+---
+title: "Identifying Clusters in a Spatial Point Pattern using Voronoi Tessellations"
+author: "Tejal Malde"
+date: "29/09/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+library(spatstat)
+library(deldir)
+```
+
+
+## Code from Chapter 2 - Using Voronoi Diagrams to test for Clustering
+
+Function that, given an area size and intensity, will run a Poisson process and output the normalised areas for the tiles of the Voronoi Tessellation:
+
+```{r Poisson Process}
+CSR_areas <- function(A, lambda){
+  x.len <- sqrt(A)
+  y.len <- sqrt(A)
+
+  pointpr <- rpoispp(lambda, win = owin(c(0,x.len),c(0,y.len)), nsim = 1)
+  areas <- dirichletAreas(pointpr)
+  areas.norm <- areas/(mean(areas))
+  return(areas.norm)  
+}   
+```
+
+And similarly for a Thomas Process:
+
+```{r Thomas Process}
+Clustered_areas <- function(A, lambda_p, eta, sd){
+  x.len <- sqrt(A)
+  y.len <- sqrt(A)
+
+  pointpr <- rThomas(lambda_p, sd, eta, win = owin(c(0,x.len),c(0,y.len)), nsim = 1)
+  pointpr.vor <- dirichlet(pointpr)
+  areas <- tile.areas(pointpr.vor)
+
+  areas.norm <- areas/(mean(areas))
+  return(areas.norm)
+}   
+```
+
+We can then use this code to calculate the p values and run the hypothesis test, summing the number of times we reject the null.
+
+```{r}
+p.arr <- array(rep(0,10*10*100),c(10,10,100))
+for (A in seq(5,50,by=5)) {
+  for (lam in seq(5,50,by=5)) {
+    for (i in 1:100) {
+      a1 <- CSR_areas(A,lam)
+      p.arr[(lam/5),(A/5),1] <- ks.test(a1,"pgamma",3.5,3.5)$p.value
+    }
+  }
+}
+
+p.graph <- array(rep(0,10*10),c(10,10))
+for (k in 1:10) {
+  for (j in 1:10) {
+    p.graph[k,j] <- sum(p.arr[k,j,] < 0.05)
+  }
+}
+```
+
+To speed up the process of calculating the areas, I simply exported the point pattern and imported the areas, on which I ran my KS test.
+
+To produce a QQ-Plot:
+
+```{r}
+A = 50
+lam = 20
+a1 <- CSR_areas(A,lam)
+a2 <- (qgamma((0:99)/100,3.5,rate=3.5))
+qqplot(a1,a2,pch=3,main=expression(paste('QQ-Plot: A=50, ',lambda,'=20')),xlab='Empirical Areas',ylab='Theoretical Distribution')
+lines(0:3,0:3,col='darkgreen') # line x = y
+```
+
+## Code from Chapter 3 - Identifying Clusters with Voronoi Diagrams
+
+Function that determines whether points are a cluster centre, border or not a cluster (labelled 2, 1, and 0 respectively):
+
+```{r}
+pointtype <- function(pointpr, pointpr.deldir, thresh){
+  
+  pointprtyp = rep(0, npoints(pointpr))
+
+  for (i in 1:npoints(pointpr)){
+    if (pgamma((pointpr.deldir$summary$dir.area[i])/(mean(pointpr.deldir$summary$dir.area)), 3.5, 3.5) < thresh){
+      for  (j in 1:length(pointpr.deldir$dirsgs$ind1)){
+        if (pointpr.deldir$dirsgs$ind1[j] == i){
+          pointprtyp[pointpr.deldir$dirsgs$ind2[j]] = 1
+       }
+        if (pointpr.deldir$dirsgs$ind2[j] == i){
+          pointprtyp[pointpr.deldir$dirsgs$ind1[j]] = 1
+       }
+      }
+    }
+  }
+  for (i in 1:npoints(pointpr)){
+    if (pgamma((pointpr.deldir$summary$dir.area[i])/(mean(pointpr.deldir$summary$dir.area)), 3.5, 3.5) < thresh){pointprtyp[i] = 2}}
+  
+  
+return(pointprtyp)
+}
+```
+
+Function that combines cluster centres (red tiles) together to give them the same cluster label.
+
+```{r}
+adjredpts <- function(index, pointpr.deldir, pointprtyp, parentgrp2){
+  for (j in 1:npoints(pointpr)){
+  if ((pointprtyp[j] == 2)&(parentgrp2[j] == 0)){
+    if (any(pointpr.deldir$dirsgs$ind2[which(pointpr.deldir$dirsgs$ind1 == j)] == index)){
+        parentgrp2[j] = parentgrp2[index]   
+      }
+    if (any(pointpr.deldir$dirsgs$ind1[which(pointpr.deldir$dirsgs$ind2 == j)] == index)){
+        parentgrp2[j] = parentgrp2[index]
+      }
+   }
+}
+  return(parentgrp2)
+}
+```
+
+Finally, putting this together, the function "label_clusters" takes in a point pattern with the coordinates of the corners of the rectangular window and outputs a list where the numbers correspond to which cluster each point is in. (0 means not in a cluster)
+
+```{r}
+label_clusters <- function(pointpr, x.min, x.max, y.min, y.max, thresh){
+  pointpr.deldir <- deldir(pointpr, rw = (c(x.min,x.max, y.min,y.max)))
+  pointprtyp <- pointtype(pointpr, pointpr.deldir, thresh)
+  
+  parentgrp <- numeric(npoints(pointpr))
+  parentgrp1 <- parentgrp
+  parentgrp2 <- parentgrp
+  z = 1
+  
+  for (i in 1:npoints(pointpr)){
+    if ((parentgrp2[i] == 0) & (pointprtyp[i] == 2)){
+      parentgrp2[i] = z
+      while (any(parentgrp2 != parentgrp)){
+        parentgrp1 <- parentgrp2
+        for (k in 1:length(parentgrp)){
+          if (parentgrp[k] != parentgrp1[k]){
+            parentgrp2 <- adjredpts(k, pointpr.deldir, pointprtyp, parentgrp2)
+          }
+        }
+        parentgrp <- parentgrp1
+      }
+      z = z+1
+    }
+  }
+  
+  for (i in 1:npoints(pointpr)){
+    if (pointprtyp[i] == 1){
+      neighbours <- numeric()
+      for (j in 1:npoints(pointpr)){
+        if ((pointprtyp[j] == 2) & ((any(pointpr.deldir$dirsgs$ind2[which(pointpr.deldir$dirsgs$ind1 == j)] == i)) | (any(pointpr.deldir$dirsgs$ind1[which(pointpr.deldir$dirsgs$ind2 == j)] == i)) )){
+          neighbours <- append(neighbours, parentgrp[j])
+          
+        }
+      }
+      parentgrp[i] <- neighbours[which.min(pointpr.deldir$summary$dir.area[neighbours])]
+
+    }
+  }
+  for (i in (1:length(parentgrp))){
+    if (is.na(parentgrp[i])){
+      parentgrp[i] = 0
+    }
+  }
+  return(parentgrp)
+}
+```
+
+For example, when importing data (such as the challenge datasets) it could be done as follows:
+
+```{r}
+challenge_data <- read.csv('C:\\Users\\teji1\\OneDrive - Imperial College London\\UROP 2020\\Datasets Cluster Analysis\\Datasets_Cluster_Analysis_Showtime_2020\\01_challenge.csv', header=F)
+x <- challenge_data[,1]
+y <- challenge_data[,2]
+pointpr <- ppp(x, y, window = owin(c(0,10000), c(0,10000)))
+parentgroup <- label_clusters(chall_pp, 0, 10000, 0, 10000, 0.01)
+```
+
+
